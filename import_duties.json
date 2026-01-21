@@ -1,0 +1,34 @@
+{
+    "Stekkerdoos": 2.7,
+    "Verdeelstekker": 2.7,
+    "Laptop Stand": 0.0,
+    "Travel Adapter": 2.7,
+    "Cable": 0.0,
+    "Powerbank": 0.0,
+    "LED": 4.7,
+    "Charger": 0.0,
+    "Other": 0.0,
+    "_hs_codes": {
+        "8536690000": {
+            "description": "Plugs and sockets for a voltage not exceeding 1000V",
+            "duty_rate": 2.7,
+            "categories": ["Stekkerdoos", "Verdeelstekker", "Travel Adapter"]
+        },
+        "8504409000": {
+            "description": "Static converters",
+            "duty_rate": 0.0,
+            "categories": ["Charger", "Powerbank"]
+        },
+        "8544429000": {
+            "description": "Electric conductors for a voltage not exceeding 1000V",
+            "duty_rate": 0.0,
+            "categories": ["Cable"]
+        },
+        "7616999000": {
+            "description": "Other articles of aluminium",
+            "duty_rate": 6.0,
+            "categories": ["Laptop Stand"]
+        }
+    },
+    "_notes": "Duty rates are percentages. Update based on your customs broker information."
+}
