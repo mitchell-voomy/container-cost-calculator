@@ -64,32 +64,69 @@ def load_google_sheet(url: str) -> Optional[pd.DataFrame]:
 def clean_text(text: str) -> str:
     if pd.isna(text):
         return ""
-    return str(text).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    return str(text).strip().lower().replace("-", "").replace("_", "")
+
+def normalize_for_match(text: str) -> str:
+    """Normalize text for matching - removes spaces and special chars"""
+    if pd.isna(text):
+        return ""
+    return re.sub(r'[^a-z0-9]', '', str(text).lower())
 
 def match_product(search_text: str, motherbase: pd.DataFrame) -> Optional[Dict]:
     if motherbase is None or motherbase.empty:
         return None
-    search_clean = clean_text(search_text)
     
-    if str(search_text).isdigit() and len(str(search_text)) == 13:
-        matches = motherbase[motherbase['EAN'].astype(str) == str(search_text)]
+    search_text = str(search_text).strip()
+    search_normalized = normalize_for_match(search_text)
+    search_lower = search_text.lower()
+    
+    # 1. Exact EAN match
+    if search_text.isdigit() and len(search_text) == 13:
+        matches = motherbase[motherbase['EAN'].astype(str) == search_text]
         if not matches.empty:
             return matches.iloc[0].to_dict()
     
-    for idx, row in motherbase.iterrows():
-        ext_code = clean_text(row.get('Product code (External)', ''))
-        if ext_code and (search_clean in ext_code or ext_code in search_clean):
-            return row.to_dict()
+    # 2. Exact match on Simplified Internal ID (e.g., "Split X2 Wit" == "Split X2 Wit")
+    if 'Simplified Internal ID' in motherbase.columns:
+        for idx, row in motherbase.iterrows():
+            simp_id = str(row.get('Simplified Internal ID', '')).strip()
+            if simp_id and simp_id.lower() == search_lower:
+                return row.to_dict()
     
-    for idx, row in motherbase.iterrows():
-        int_code = clean_text(row.get('Product code (Internal)', ''))
-        if int_code and (search_clean in int_code or int_code in search_clean):
-            return row.to_dict()
+    # 3. Partial match on Simplified Internal ID (e.g., "Power Cube S5 Zwart" contains "Power Cube S5")
+    if 'Simplified Internal ID' in motherbase.columns:
+        for idx, row in motherbase.iterrows():
+            simp_id = str(row.get('Simplified Internal ID', '')).strip().lower()
+            if simp_id and len(simp_id) > 3:
+                if simp_id in search_lower or search_lower in simp_id:
+                    return row.to_dict()
     
-    for idx, row in motherbase.iterrows():
-        simp_id = clean_text(row.get('Simplified Internal ID', ''))
-        if simp_id and (search_clean in simp_id or simp_id in search_clean):
-            return row.to_dict()
+    # 4. Match on Product code (External) - supplier codes like TP-MA4U4E
+    if 'Product code (External)' in motherbase.columns:
+        for idx, row in motherbase.iterrows():
+            ext_code = normalize_for_match(row.get('Product code (External)', ''))
+            if ext_code and len(ext_code) > 3:
+                if ext_code in search_normalized or search_normalized in ext_code:
+                    return row.to_dict()
+    
+    # 5. Match on Product code (Internal) - like VX0212, VS0811
+    if 'Product code (Internal)' in motherbase.columns:
+        for idx, row in motherbase.iterrows():
+            int_code = normalize_for_match(row.get('Product code (Internal)', ''))
+            if int_code and len(int_code) > 2:
+                if int_code in search_normalized or search_normalized in int_code:
+                    return row.to_dict()
+    
+    # 6. Fuzzy match on Title
+    if 'Title' in motherbase.columns:
+        for idx, row in motherbase.iterrows():
+            title = str(row.get('Title', '')).lower()
+            # Check if key words match
+            search_words = [w for w in search_lower.split() if len(w) > 2]
+            if search_words:
+                matches = sum(1 for w in search_words if w in title)
+                if matches >= len(search_words) * 0.7:  # 70% of words match
+                    return row.to_dict()
     
     return None
 
@@ -295,45 +332,165 @@ def main():
             with doc_col2:
                 pl_file = st.file_uploader("Packing List (PL)", type=['xlsx', 'xls', 'pdf'], key="pl_upload")
             
-            # Parse uploaded files
-            if ci_file or pl_file:
-                st.markdown("### 📊 Extracted Data")
+            # Parse uploaded files and extract line items
+            extracted_items = []
+            extracted_cbm = {}
+            
+            if ci_file and ci_file.name.endswith(('.xlsx', '.xls')):
+                try:
+                    ci_df = pd.read_excel(ci_file)
+                    st.write("**📊 Extracted from CI:**")
+                    
+                    # Find header row
+                    header_row = None
+                    for idx, row in ci_df.iterrows():
+                        row_text = ' '.join(str(v) for v in row.values if pd.notna(v)).lower()
+                        if 'description' in row_text and ('qty' in row_text or 'quantity' in row_text):
+                            header_row = idx
+                            break
+                    
+                    if header_row is not None:
+                        # Parse data rows
+                        for idx in range(header_row + 1, len(ci_df)):
+                            row = ci_df.iloc[idx]
+                            row_values = [v for v in row.values if pd.notna(v)]
+                            row_text = ' '.join(str(v) for v in row_values)
+                            
+                            # Skip total row
+                            if 'total' in row_text.lower():
+                                continue
+                            
+                            # Extract: description, quantity, unit price
+                            description = None
+                            qty = None
+                            unit_price = None
+                            
+                            for val in row_values:
+                                val_str = str(val).strip()
+                                # Skip HS codes (10 digits)
+                                if val_str.isdigit() and len(val_str) == 10:
+                                    continue
+                                # Check if it's a number
+                                try:
+                                    num = float(str(val).replace(',', ''))
+                                    if qty is None and 1 <= num <= 50000 and num == int(num):
+                                        qty = int(num)
+                                    elif unit_price is None and 0.1 <= num <= 500:
+                                        unit_price = num
+                                except:
+                                    # It's text - likely description
+                                    if description is None and len(val_str) > 2 and not val_str.replace('.','').replace(',','').isdigit():
+                                        description = val_str
+                            
+                            if description and qty:
+                                extracted_items.append({
+                                    'description': description,
+                                    'quantity': qty,
+                                    'unit_price': unit_price or 0,
+                                    'cbm': 0
+                                })
+                        
+                        # Show extracted data
+                        if extracted_items:
+                            extract_df = pd.DataFrame(extracted_items)
+                            st.dataframe(extract_df, use_container_width=True)
+                        else:
+                            st.warning("Could not extract line items automatically")
+                except Exception as e:
+                    st.warning(f"Could not parse CI: {e}")
+            
+            if pl_file and pl_file.name.endswith(('.xlsx', '.xls')):
+                try:
+                    pl_df = pd.read_excel(pl_file)
+                    st.write("**📊 Extracted from PL (CBM data):**")
+                    
+                    # Find header row
+                    header_row = None
+                    for idx, row in pl_df.iterrows():
+                        row_text = ' '.join(str(v) for v in row.values if pd.notna(v)).lower()
+                        if 'description' in row_text or 'carton' in row_text or 'volume' in row_text:
+                            header_row = idx
+                            break
+                    
+                    if header_row is not None:
+                        pl_data = []
+                        current_product = None
+                        
+                        for idx in range(header_row + 1, len(pl_df)):
+                            row = pl_df.iloc[idx]
+                            row_values = [v for v in row.values if pd.notna(v)]
+                            row_text = ' '.join(str(v) for v in row_values)
+                            
+                            if 'total' in row_text.lower():
+                                continue
+                            
+                            # Look for product code (TP-XXX pattern)
+                            product_code = None
+                            for val in row_values:
+                                val_str = str(val)
+                                if 'TP-' in val_str.upper():
+                                    product_code = val_str
+                                    current_product = val_str
+                                    break
+                            
+                            # Extract CBM (decimal number < 100)
+                            cbm = None
+                            qty = None
+                            for val in row_values:
+                                try:
+                                    num = float(str(val).replace(',', ''))
+                                    if cbm is None and 0 < num < 50 and num != int(num):
+                                        cbm = num
+                                    elif qty is None and 10 <= num <= 50000 and num == int(num):
+                                        qty = int(num)
+                                except:
+                                    pass
+                            
+                            if (product_code or current_product) and qty:
+                                pl_data.append({
+                                    'product_code': product_code or current_product,
+                                    'quantity': qty,
+                                    'cbm': cbm or 0
+                                })
+                                # Store CBM for matching
+                                if cbm:
+                                    key = (current_product or '').upper()
+                                    if key not in extracted_cbm:
+                                        extracted_cbm[key] = 0
+                                    extracted_cbm[key] += cbm
+                        
+                        if pl_data:
+                            st.dataframe(pd.DataFrame(pl_data), use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Could not parse PL: {e}")
+            
+            # Generate pre-filled line items text
+            prefilled_text = ""
+            if extracted_items:
+                for item in extracted_items:
+                    desc = item['description']
+                    qty = item['quantity']
+                    price = item['unit_price']
+                    # Try to find CBM from PL
+                    cbm = 0
+                    for key, val in extracted_cbm.items():
+                        if any(word.upper() in key for word in desc.split() if len(word) > 3):
+                            cbm = val
+                            break
+                    prefilled_text += f"{desc} | {qty} | {price} | {cbm}\n"
                 
-                if ci_file and ci_file.name.endswith(('.xlsx', '.xls')):
-                    try:
-                        ci_df = pd.read_excel(ci_file)
-                        # Find header row with Description
-                        header_row = None
-                        for idx, row in ci_df.iterrows():
-                            if any('Description' in str(val) for val in row.values if pd.notna(val)):
-                                header_row = idx
-                                break
-                        if header_row is not None:
-                            st.write("**From CI:**")
-                            st.dataframe(ci_df.iloc[header_row+1:header_row+20], use_container_width=True)
-                    except Exception as e:
-                        st.warning(f"Could not parse CI: {e}")
-                
-                if pl_file and pl_file.name.endswith(('.xlsx', '.xls')):
-                    try:
-                        pl_df = pd.read_excel(pl_file)
-                        header_row = None
-                        for idx, row in pl_df.iterrows():
-                            if any('Description' in str(val) or 'Carton' in str(val) for val in row.values if pd.notna(val)):
-                                header_row = idx
-                                break
-                        if header_row is not None:
-                            st.write("**From PL:**")
-                            st.dataframe(pl_df.iloc[header_row+1:header_row+20], use_container_width=True)
-                    except Exception as e:
-                        st.warning(f"Could not parse PL: {e}")
-                
-                st.info("💡 Copy the relevant data from above into the line items below")
+                st.success(f"✅ Extracted {len(extracted_items)} items from CI")
             
             st.markdown("---")
             st.markdown("### 📝 Line Items")
             st.markdown("`Product Code | Quantity | Unit Price (USD) | CBM`")
-            manual_items = st.text_area("One item per line", height=150, placeholder="TP-MA4U4E Black | 1800 | 7.23 | 4.25", key="manual_items")
+            manual_items = st.text_area(
+                "One item per line", 
+                height=200, 
+                value=prefilled_text.strip() if prefilled_text else "",
+                placeholder="TP-MA4U4E Black | 1800 | 7.23 | 4.25", 
+                key="manual_items"
+            )
             
             if st.button("✅ Add Order", type="primary"):
                 if supplier_name and order_number:
@@ -460,3 +617,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
