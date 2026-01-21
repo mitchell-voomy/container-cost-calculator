@@ -288,6 +288,49 @@ def main():
                 st.success(f"**Total Paid: €{total_eur:,.2f}**{fx_info}")
             
             st.markdown("---")
+            st.subheader("📄 Upload Documents (Optional)")
+            doc_col1, doc_col2 = st.columns(2)
+            with doc_col1:
+                ci_file = st.file_uploader("Commercial Invoice (CI)", type=['xlsx', 'xls', 'pdf'], key="ci_upload")
+            with doc_col2:
+                pl_file = st.file_uploader("Packing List (PL)", type=['xlsx', 'xls', 'pdf'], key="pl_upload")
+            
+            # Parse uploaded files
+            if ci_file or pl_file:
+                st.markdown("### 📊 Extracted Data")
+                
+                if ci_file and ci_file.name.endswith(('.xlsx', '.xls')):
+                    try:
+                        ci_df = pd.read_excel(ci_file)
+                        # Find header row with Description
+                        header_row = None
+                        for idx, row in ci_df.iterrows():
+                            if any('Description' in str(val) for val in row.values if pd.notna(val)):
+                                header_row = idx
+                                break
+                        if header_row is not None:
+                            st.write("**From CI:**")
+                            st.dataframe(ci_df.iloc[header_row+1:header_row+20], use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Could not parse CI: {e}")
+                
+                if pl_file and pl_file.name.endswith(('.xlsx', '.xls')):
+                    try:
+                        pl_df = pd.read_excel(pl_file)
+                        header_row = None
+                        for idx, row in pl_df.iterrows():
+                            if any('Description' in str(val) or 'Carton' in str(val) for val in row.values if pd.notna(val)):
+                                header_row = idx
+                                break
+                        if header_row is not None:
+                            st.write("**From PL:**")
+                            st.dataframe(pl_df.iloc[header_row+1:header_row+20], use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Could not parse PL: {e}")
+                
+                st.info("💡 Copy the relevant data from above into the line items below")
+            
+            st.markdown("---")
             st.markdown("### 📝 Line Items")
             st.markdown("`Product Code | Quantity | Unit Price (USD) | CBM`")
             manual_items = st.text_area("One item per line", height=150, placeholder="TP-MA4U4E Black | 1800 | 7.23 | 4.25", key="manual_items")
